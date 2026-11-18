@@ -1050,3 +1050,204 @@ assert ICMPExtension_InterfaceInformation in pkt[ICMP].ext
 assert pkt[ICMP].ext.ifindex == 15
 assert pkt[ICMP].ext.ip4 == "10.10.10.10"
 assert pkt[ICMP].ext.ifname == b"This-is-the-name-of-the-Interface-that-we-are-looking-for-[:-)]"
+
+
+############
+############
++ Defragmentation of adversarial fragment streams
+
+= defrag() - duplicate fragment before completion poisons every fragment of the datagram
+* A duplicate arriving while the datagram is still incomplete overlaps fragments already
+* buffered: nothing of the datagram can be trusted, so every fragment it is made of,
+* the duplicate included, is handed back in the bad fragment bucket.
+for layer, fragsize, dup_position in [
+        (Raw(b"D" * 40), 16, 0),
+        (Raw(b"D" * 40), 16, 1),
+        (TCP(sport=1234, dport=80) / Raw(b"E" * 60), 24, 1),
+        (UDP(sport=53, dport=53) / Raw(b"F" * 72), 24, 1),
+]:
+    datagram = IP(id=0x1234, proto=253, src="10.0.0.1", dst="10.0.0.2") / layer
+    frags = fragment(datagram, fragsize)
+    assert len(frags) >= 3, "the duplicate must not be the last fragment"
+    duplicate = frags[dup_position].copy()
+    stream = frags[:dup_position + 1] + [duplicate] + frags[dup_position + 1:]
+    snapshot = [bytes(p) for p in stream]
+    nonfrag, unfrag, badfrag = defrag(stream)
+    assert not nonfrag and not unfrag
+    assert len(badfrag) == len(stream), "every fragment must be returned"
+    assert all(any(p is q for q in stream) for p in badfrag), "original objects only"
+    assert sorted(bytes(p) for p in badfrag) == sorted(snapshot)
+    complete = defragment(stream)
+    assert len(complete) == len(stream)
+    assert all(any(p is q for q in stream) for p in complete), "original objects only"
+    assert sorted(bytes(p) for p in complete) == sorted(snapshot)
+    assert all(bytes(p) != bytes(datagram) for p in complete), "nothing reassembled"
+
+= defrag() - duplicate fragment after completion leaves only the orphan fragment
+* Once the datagram is complete, a late duplicate no longer poisons it: the datagram
+* is rebuilt and the orphan is returned alone in the bad fragment bucket.
+for layer, fragsize, dup_position in [
+        (Raw(b"G" * 40), 16, 0),
+        (Raw(b"G" * 40), 16, -1),
+        (TCP(sport=80, dport=4711) / Raw(b"H" * 60), 24, -1),
+        (UDP(sport=53, dport=53) / Raw(b"I" * 72), 24, 0),
+]:
+    datagram = IP(id=0x2345, proto=253, src="10.0.0.1", dst="10.0.0.2") / layer
+    frags = fragment(datagram, fragsize)
+    orphan = frags[dup_position].copy()
+    orphan_bytes = bytes(orphan)
+    stream = frags + [orphan]
+    nonfrag, unfrag, badfrag = defrag(stream)
+    assert not nonfrag
+    assert len(unfrag) == 1 and bytes(unfrag[0]) == bytes(datagram)
+    assert len(badfrag) == 1
+    assert badfrag[0] is orphan and bytes(badfrag[0]) == orphan_bytes
+    complete = defragment(stream)
+    assert len(complete) == 2
+    assert complete[0] is not orphan and bytes(complete[0]) == bytes(datagram)
+    assert complete[1] is orphan and bytes(complete[1]) == orphan_bytes
+
+= defrag() - overlapping fragments poison the datagram
+* A forged fragment overlapping the genuine offsets must not be resolved in favour of
+* either side: the genuine fragments and the forgery are all handed back untouched.
+for inserted_at in [0, 1, 2]:
+    datagram = IP(id=0x3456, proto=253, src="10.0.0.1", dst="10.0.0.2") / Raw(b"J" * 48)
+    frags = fragment(datagram, 16)
+    forged = IP(id=0x3456, proto=253, src="10.0.0.1", dst="10.0.0.2", flags="MF", frag=1) / Raw(b"K" * 16)
+    stream = frags[:inserted_at] + [forged] + frags[inserted_at:]
+    snapshot = [bytes(p) for p in stream]
+    nonfrag, unfrag, badfrag = defrag(stream)
+    assert not nonfrag and not unfrag
+    assert len(badfrag) == len(stream)
+    assert all(any(p is q for q in stream) for p in badfrag), "original objects only"
+    assert sorted(bytes(p) for p in badfrag) == sorted(snapshot)
+    assert [p[IP].frag for p in badfrag] == [0, 1, 2, 4]
+    complete = defragment(stream)
+    assert len(complete) == len(stream)
+    assert all(any(p is q for q in stream) for p in complete), "original objects only"
+    assert sorted(bytes(p) for p in complete) == sorted(snapshot)
+    assert all(bytes(p) != bytes(datagram) for p in complete), "nothing reassembled"
+
+= defrag() - fragments sharing an id but differing in protocol, source or destination reassemble independently
+* The reassembly key is the whole (id, src, dst, proto) tuple: identical ids carried
+* by another protocol, another source or another destination must not be merged.
+variants = [
+    (253, "10.0.0.1", "10.0.0.2", b"A"),
+    (254, "10.0.0.1", "10.0.0.2", b"B"),
+    (253, "10.0.0.9", "10.0.0.2", b"C"),
+    (253, "10.0.0.1", "10.0.0.8", b"D"),
+]
+groups = []
+for proto, src, dst, marker in variants:
+    datagram = IP(id=0x4567, proto=proto, src=src, dst=dst) / Raw(marker * 64)
+    groups.append((datagram, fragment(datagram, 16)))
+
+assert all(len(frags) == 4 for _, frags in groups)
+stream = [frags[i] for i in range(4) for _, frags in groups]
+nonfrag, unfrag, badfrag = defrag(stream)
+assert not nonfrag and not badfrag
+assert len(unfrag) == len(variants)
+assert sorted(bytes(p) for p in unfrag) == sorted(bytes(g[0]) for g in groups)
+assert sorted((p[IP].proto, p[IP].src, p[IP].dst) for p in unfrag) == sorted(
+    (g[0][IP].proto, g[0][IP].src, g[0][IP].dst) for g in groups
+)
+for proto, src, dst, marker in variants:
+    assert [bytes(p[IP].payload) for p in unfrag
+            if (p[IP].proto, p[IP].src, p[IP].dst) == (proto, src, dst)] == [marker * 64]
+
+= defrag() - the bad fragment bucket returns the very packet objects that were fed in
+* Fragments that cannot be reassembled are neither copied nor rewritten: callers get
+* back their own objects, byte for byte, with their fields untouched.
+datagram = IP(id=0x5678, proto=253, src="10.0.0.1", dst="10.0.0.2") / Raw(b"L" * 64)
+frags = fragment(datagram, 16)
+incomplete = frags[1:]
+snapshot = [bytes(p) for p in incomplete]
+fieldstate = [(p[IP].flags, p[IP].frag, p[IP].len, p[IP].chksum) for p in incomplete]
+nonfrag, unfrag, badfrag = defrag(incomplete)
+assert not nonfrag and not unfrag
+assert len(badfrag) == len(incomplete)
+assert all(p is q for p, q in zip(badfrag, incomplete))
+assert [bytes(p) for p in badfrag] == snapshot
+assert [(p[IP].flags, p[IP].frag, p[IP].len, p[IP].chksum) for p in badfrag] == fieldstate
+complete = defragment(incomplete)
+assert len(complete) == len(incomplete)
+assert all(p is q for p, q in zip(complete, incomplete))
+assert [bytes(p) for p in complete] == snapshot
+
+= defrag() / defragment() - non-IP packets are dropped by defrag() but kept by defragment()
+arp = ARP()
+eth = Ether() / Raw(b"not an IP packet")
+v6 = IPv6() / Raw(b"also not an IP packet")
+datagram = IP(id=0x6789, proto=253, src="10.0.0.1", dst="10.0.0.2") / Raw(b"M" * 48)
+frags = fragment(datagram, 16)
+stream = [arp, frags[0], eth, frags[1], v6, frags[2]]
+nonfrag, unfrag, badfrag = defrag(stream)
+assert not nonfrag and not badfrag
+assert len(unfrag) == 1 and bytes(unfrag[0]) == bytes(datagram)
+returned = list(nonfrag) + list(unfrag) + list(badfrag)
+assert all(not any(p is q for q in returned) for p in (arp, eth, v6))
+complete = defragment(stream)
+assert len(complete) == 4
+assert complete[0] is arp and complete[1] is eth and complete[2] is v6
+assert bytes(complete[3]) == bytes(datagram)
+
+= defrag() does not keep reassembly state across calls
+datagram = IP(id=0x789A, proto=253, src="10.0.0.1", dst="10.0.0.2") / Raw(b"N" * 48)
+frags = fragment(datagram, 16)
+nonfrag, unfrag, badfrag = defrag(frags[:-1])
+assert not nonfrag and not unfrag
+assert len(badfrag) == len(frags) - 1
+nonfrag, unfrag, badfrag = defrag(frags[-1:])
+assert not nonfrag and not unfrag
+assert len(badfrag) == 1 and badfrag[0] is frags[-1]
+assert all(bytes(p) != bytes(datagram) for p in badfrag)
+
+= IPSession reassembles across process() calls and forgets the datagram afterwards
+datagram = IP(id=0x8ABC, proto=253, src="10.0.0.1", dst="10.0.0.2") / Raw(b"O" * 48)
+frags = fragment(datagram, 16)
+session = IPSession()
+results = [session.process(p) for p in frags]
+assert results[:-1] == [None] * (len(frags) - 1)
+assert results[-1] is not None and bytes(results[-1]) == bytes(datagram)
+assert session.fragments == {}
+nonip = ARP()
+assert session.process(nonip) is nonip
+
+= IPSession drops an overlapping datagram and forgets its state
+datagram = IP(id=0x9CDE, proto=253, src="10.0.0.1", dst="10.0.0.2") / Raw(b"P" * 48)
+frags = fragment(datagram, 16)
+session = IPSession()
+forged = IP(id=0x9CDE, proto=253, src="10.0.0.1", dst="10.0.0.2", flags="MF", frag=1) / Raw(b"Q" * 16)
+results = [session.process(p) for p in [frags[0], forged, frags[1], frags[2]]]
+assert results == [None, None, None, None]
+assert session.fragments == {}
+results = [session.process(p) for p in frags]
+assert results[-1] is not None and bytes(results[-1]) == bytes(datagram)
+
+= defrag() - rebuilding dissected fragments keeps protocol and flags
+* Input taken from the wire is dissected: the rebuilt datagram keeps the protocol
+* field, keeps DF, clears MF and resets the fragment offset.
+for proto, layer, fragsize, flags in [
+        (253, Raw(b"R" * 48), 16, 0),
+        (253, Raw(b"R" * 48), 16, "DF"),
+        (6, TCP(sport=4711, dport=443) / Raw(b"S" * 60), 24, "DF"),
+        (17, UDP(sport=5353, dport=5353) / Raw(b"T" * 72), 24, 0),
+]:
+    datagram = IP(id=0xADEF, proto=proto, src="10.0.0.1", dst="10.0.0.2", flags=flags) / layer
+    wire = fragment(datagram, fragsize)
+    with no_debug_dissector():
+        dissected = [IP(bytes(p)) for p in wire]
+    assert all(p[IP].proto == proto for p in dissected)
+    nonfrag, unfrag, badfrag = defrag(dissected)
+    assert not nonfrag and not badfrag
+    assert len(unfrag) == 1
+    rebuilt = unfrag[0]
+    assert rebuilt[IP].proto == proto
+    assert bool(rebuilt[IP].flags.MF) is False
+    assert bool(rebuilt[IP].flags.DF) is bool(datagram[IP].flags.DF)
+    assert rebuilt[IP].frag == 0
+    assert rebuilt[IP].src == datagram[IP].src
+    assert rebuilt[IP].dst == datagram[IP].dst
+    assert type(rebuilt[IP].payload) is type(dissected[0][IP].payload)
+    assert bytes(rebuilt[IP].payload) == bytes(datagram[IP].payload)
+    assert bytes(rebuilt) == bytes(datagram)
