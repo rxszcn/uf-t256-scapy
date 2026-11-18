@@ -1,0 +1,175 @@
+# How to contribute
+
+Contributors are essential to Scapy (as they are to most open source
+projects). Here is some advice to help you help the project!
+
+## Project objectives
+
+We try to keep Scapy as powerful as possible, to support as many
+protocols and platforms as possible, to keep and make the code (and
+the commit history) as clean as possible.
+
+Since Scapy can be slow and memory consuming, we try to limit CPU and
+memory usage, particularly in parts of the code often called.
+
+## What to contribute
+
+You want to spend time working on Scapy but have no (or little)
+idea what to do? You can look for open issues
+[labeled "contributions wanted"](https://github.com/secdev/scapy/labels/contributions%20wanted), or look at the [contributions roadmap](https://github.com/secdev/scapy/issues/399)
+
+If you have any ideas of useful contributions that you cannot (or do
+not want to) do yourself, open an issue and include
+"contributions wanted" in the title.
+
+Once you have chosen a contribution, open an issue to let other people
+know you're working on it (or assign the existing issue to yourself)
+and track your progress. You might want to ask whether you're working
+in an appropriate direction, to avoid the frustration of seeing your
+contribution rejected after a lot of work.
+
+## Reporting issues
+
+### Bugs
+
+If you have installed Scapy through a package manager (from your Linux
+or BSD system, from PyPI, etc.), please get and install the current
+development code, and check that the bug still exists before
+submitting an issue.
+
+If you're not sure whether a behavior is a bug or not, submit an issue
+and ask, don't be shy!
+
+### AI-assisted reports and PRs
+
+<!-- Wireshark has greate AI guidelines ! Let's not reinvent the wheel -->
+<!-- https://gitlab.com/wireshark/wireshark/-/blob/master/doc/wsug_src/wsug_introduction.adoc -->
+
+If you use AI tools to help find or draft a bug report (or a PR), please mention that and make sure you have personally verified the steps and details before submitting. Please keep reports succinct !
+
+Purely AI-generated or overly verbose reports are not supported and might be closed. Please also **avoid answering to maintainers comments with AI**. It's important to keep the human input to keep triage efficient for everyone.
+
+For a report, verify the bug against the current development code. For a PR, follow [Coding style & conventions](#coding-style--conventions) and [Tests](#tests): add tests (or explain why they aren't relevant), and check that every commit has the required `AI-Assisted` tag. To run the optional flake8 check with the same Python version as CI, install tox for Python 3.12 and use `python3.12 -m tox -e flake8`; `tox.ini` does not select that interpreter for this environment.
+
+The readthedocs documentation is for humans, and needs to be thought as such. You may NOT generate documentation inside the `doc/` folder using AI.
+
+If you're configuring an agent for Scapy, see [AGENTS.md](AGENTS.md).
+
+### Enhancements / feature requests
+
+If you want a feature in Scapy, but cannot implement it yourself or
+want some hints on how to do that, open an issue and include
+"enhancement" in the title.
+
+Explain if possible the API you would like to have (e.g., give examples
+of function calls, packet creations, etc.).
+
+## Submitting pull requests
+
+### Commit conventions
+
+-   All commits should include the `AI-Assisted: (yes/no) [tool]` tag. This is used to disclose the AI tools that are used when authoring. You must check the commits you produce, or your PR might be closed. The tag may look like such:
+
+    ```
+    AI-Assisted: yes (Claude Opus 4.7)
+    ```
+    or
+    
+    ```
+    AI-Assisted: no
+    ```
+    This guideline is adapted with thanks to [Wireshark's AI usage statement](https://www.wireshark.org/docs/wsdg_html_chunked/ChSrcContribute.html).
+
+### Coding style
+
+-   Make readable code. Add comments, use functions where they are needed but most importantly do not add functions where they are not needed.
+-   Make consistent code. Keep the style of the files you're editing consistent. Keep the protocols fields names consistent with the ones in the RFCs or specifications. Keep the case of variables consistent with what's usually used (e.g. most protocols use snake case, but Windows protocols typically use pascal case, etc.).
+-   Re-use what exists in Scapy. Before creating a new custom `Field`, make sure that you cannot find a different way to achieve the same behavior by using only native fields, or by extending an existing field. When coding, AI can be very good tool to find code patterns that already exist. Create new files only when adding new concepts (new protocols, new features, etc.).
+-   **The code should be PEP-8 compliant**; you can check your code with [flake8](https://pypi.python.org/pypi/flake8) and the command `tox -e flake8`. The CI will make sure of that on all new code.
+
+### Tests
+
+We require adding tests for almost all new features or bug fixes, or a justification as to why they are not relevant. We know it's annoying, but Scapy is all about parsing and dissecting weird protocols us maintainers will never encounter. Having good tests is the only way to keep the code maintainable.
+
+- If you are fixing a bug, provide a one-liner that reproduced the bug you are fixing.
+- If you are introducing dissectors, provide at least a very simple "dissect" / "build" of real packets with simple assertions.
+- Tests can be very simple. It's much better to have dumb tests that break when one does changes than no tests.
+- Do not use the variable `_` in your tests, as it could break them.
+- The only case where it is acceptable to skip adding tests is when you have a single-line fix (or similar) that requires a very big and complicated test to fix. Maintainers may still ask you to add some, to their discretion.
+
+If you find yourself in a situation where your tests locally succeed  but 
+fail if executed on the CI, try to enable the debugging option for the 
+dissector by setting `conf.debug_dissector = 1`. In doubt, feel free to ask maintainers for help.
+
+### New protocols
+
+New protocols can go either in `scapy/layers` or to
+`scapy/contrib`. Protocols in `scapy/layers` should be usually found
+on common networks, while protocols in `scapy/contrib` should be
+uncommon or specific.
+
+To be precise, `scapy/layers` protocols should not be importing `scapy/contrib`
+protocols, whereas `scapy/contrib` protocols may import both `scapy/contrib` and
+`scapy/layers` protocols.
+
+The detailed requirements are explained in [Design patterns](https://scapy.readthedocs.io/en/latest/build_dissect.html#design-patterns) on Scapy's doc.
+
+### Features
+
+Protocol-related features should be implemented within the same module
+as the protocol layers(s) (e.g., `traceroute()` is implemented in
+`scapy/layers/inet.py`).
+
+Other features may be implemented in a module (`scapy/modules`) or a
+contribution (`scapy/contrib`).
+
+### Core
+
+If you contribute to Scapy's core (e.g., `scapy/base_classes.py`,
+`scapy/packet.py`, etc.), please be very careful with performances and
+memory footprint, as it is easy to write Python code that wastes
+memory or CPU cycles.
+
+As an example, `Packet().__init__()` is called each time a **layer** is
+parsed from a string (during a network capture or a PCAP file
+read). Adding inefficient code here will have a disastrous effect on
+Scapy's performances.
+
+### Logging
+
+Scapy has an internal logging system based on `logging`.
+
+In the past, Scapy was generally too verbose on packet dissection,
+leading many new users to disable all logs, which makes it harder for them
+to find real issues afterwards. You should comply with these guidelines to
+make sure logging in Scapy remains helpful.
+
+-  If you want the log message to only be displayed when using Scapy through
+   the interactive console, use `scapy.error.log_interactive`. You are free to
+   use any log level.
+-  Otherwise, always use `scapy.error.log_runtime`.
+   -  On **packet dissection**, of *packet layers*
+      you should remain **AT OR BELOW the `logging.INFO` level**, unless the
+      issue is critical or tied to security.
+      For instance: "DNS Decompression loop detected !" is allowed as WARNING,
+      but "Could not dissect packet" or "Invalid value detected" are not.
+   -  On **packet build** or **any command** or function that is called by the
+      user or the root program, you are **free and welcomed** to use the WARNING
+      or ERROR levels, to signal that a packet was wrongly built for instance.
+-  If you are working on Scapy's core, you may use: `scapy.error.log_loading`
+   only while Scapy is loading, to display import errors for instance.
+
+### Code review
+
+Maintainers tend to be picky, and you might feel frustrated that your
+code (which is perfectly working in your use case) is not merged
+faster.
+
+Please don't be offended, and keep in mind that maintainers are
+concerned about code maintainability and readability, commit history
+(we use the history a lot, for example to find regressions or
+understand why certain decisions have been made), performances,
+integration in Scapy, API consistency (so that someone who knows how
+to use Scapy will know how to use your code), etc.
+
+**Thanks for reading, happy hacking!**

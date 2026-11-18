@@ -1,0 +1,249 @@
+name: Scapy unit tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    # The branches below must be a subset of the branches above
+    branches: [master]
+
+# https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/control-the-concurrency-of-workflows-and-jobs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !contains(github.ref, 'master')}}
+
+permissions:
+  contents: read
+
+jobs:
+  commit:
+    name: Check the validity of the commits
+    runs-on: ubuntu-latest
+    # We follow the same contributing patterns as Wireshark. Thanks to
+    # https://gitlab.com/wireshark/wireshark/-/blob/master/.gitlab-ci.yml
+    steps:
+      - name: Get the number of commits in the PR
+        run: echo "PR_FETCH_DEPTH=$(( ${{ github.event.pull_request.commits }} + 1 ))" >> "${GITHUB_ENV}"
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip-ai-check')
+      - name: Checkout Scapy
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: ${{ env.PR_FETCH_DEPTH }}
+          fetch-tags: true
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip-ai-check')
+      - name: Checkout master tag
+        run: git fetch origin master:master
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip-ai-check')
+      - name: AI trailer reminder
+        run: bash ./.config/ci/check_commits.sh
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip-ai-check')
+  spdx:
+    name: Check SPDX identifiers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Scapy
+        uses: actions/checkout@v6
+      - name: All files should have a SPDX identifier
+        run: bash scapy/tools/check_spdx.sh
+  health:
+    name: Code health check
+    runs-on: ubuntu-latest
+    needs: [commit, spdx]
+    steps:
+      - name: Checkout Scapy
+        uses: actions/checkout@v6
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install tox
+        run: pip install tox
+      - name: Run flake8 tests
+        run: tox -e flake8
+      - name: Run codespell
+        run: tox -e spell
+      - name: Run twine check
+        run: tox -e twine
+      - name: Run gitarchive check
+        run: tox -e gitarchive
+  docs:
+    # 'runs-on' and 'python-version' should match the ones defined in .readthedocs.yml
+    name: Build doc
+    runs-on: ubuntu-24.04
+    needs: [commit, spdx]
+    steps:
+      - name: Checkout Scapy
+        uses: actions/checkout@v6
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install tox
+        run: pip install tox
+      - name: Build docs
+        run: tox -e docs
+  mypy:
+    name: Type hints check
+    runs-on: ubuntu-latest
+    needs: [commit, spdx]
+    steps:
+      - name: Checkout Scapy
+        uses: actions/checkout@v6
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install tox
+        run: pip install tox
+      - name: Run mypy
+        run: tox -e mypy
+
+  utscapy:
+    name: ${{ matrix.os }} ${{ matrix.installmode }} ${{ matrix.python }} ${{ matrix.mode }} ${{ matrix.flags }}
+    runs-on: ${{ matrix.runner }}
+    needs: [commit, spdx]
+    timeout-minutes: 30
+    continue-on-error: ${{ matrix.allow-failure == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        runner: [ubuntu-26.04]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        mode: [non_root]
+        installmode: ['']
+        flags: [" -K scanner"]
+        allow-failure: ['false']
+        # See https://github.com/actions/runner-images for availability
+        include:
+          # Python 3.9
+          - os: ubuntu-24.04
+            runner: ubuntu-24.04
+            python: "3.9"
+            mode: non_root
+            flags: " -K scanner"
+          # Linux root tests on last version
+          - os: ubuntu-latest
+            runner: ubuntu-24.04
+            python: "3.14"
+            mode: root
+            flags: " -K scanner"
+          # PyPy tests: root only
+          # - os: ubuntu-latest
+          #   runner: ubuntu-24.04
+          #   python: "pypy3.11"
+          #   mode: root
+          #   flags: " -K scanner"
+          # Libpcap test
+          - os: ubuntu-latest
+            runner: ubuntu-24.04
+            python: "3.14"
+            mode: root
+            installmode: 'libpcap'
+            flags: " -K scanner"
+          # macOS tests
+          - os: macos-26
+            runner: macos-26
+            python: "3.14"
+            mode: both
+            flags: " -K scanner"
+          # windows tests
+          - os: windows-latest
+            runner: windows-latest
+            python: "3.14"
+            mode: root
+            flags: " -K scanner"
+          # Scanner tests
+          - os: ubuntu-latest
+            runner: ubuntu-24.04
+            python: "3.14"
+            mode: root
+            allow-failure: 'true'
+            flags: " -k scanner"
+          # - os: ubuntu-latest
+          #   runner: ubuntu-24.04
+          #   python: "pypy3.11"
+          #   mode: root
+          #   flags: " -k scanner"
+          - os: macos-26
+            runner: macos-26
+            python: "3.14"
+            mode: both
+            allow-failure: 'true'
+            flags: " -k scanner"
+          - os: windows-latest
+            runner: windows-latest
+            python: "3.14"
+            mode: both
+            allow-failure: 'true'
+            flags: " -k scanner"
+    steps:
+      - name: Checkout Scapy
+        uses: actions/checkout@v6
+        # Codecov requires a fetch-depth > 1
+        with:
+          fetch-depth: 2
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install Tox and any other packages (linux/osx)
+        run: ./.config/ci/install.sh ${{ matrix.installmode }}
+        if: ${{ ! contains(matrix.os, 'windows') }}
+      - name: Install Tox and any other packages (win)
+        run: ./.config/ci/install.ps1
+        if: ${{ contains(matrix.os, 'windows') }}
+      - name: Run Tox (linux/osx)
+        run: ./.config/ci/test.sh ${{ matrix.python }} ${{ matrix.mode }}
+        env:
+          UT_FLAGS: ${{ matrix.flags }}
+        if: ${{ ! contains(matrix.os, 'windows') }}
+      - name: Run Tox (win)
+        run: ./.config/ci/test.ps1 ${{ matrix.python }}
+        env:
+          UT_FLAGS: ${{ matrix.flags }}
+        if: ${{ contains(matrix.os, 'windows') }}
+      - name: Codecov
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  cryptography:
+    name: pyca/cryptography test
+    runs-on: ubuntu-latest
+    needs: [commit, spdx]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+    - name: Setup Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.14"
+    - name: Install tox
+      run: pip install tox
+    # pyca/cryptography's CI installs cryptography
+    # then runs the tests. We therefore didn't include it in tox
+    - name: Install cryptography
+      run: pip install cryptography
+    - name: Run tests
+      run: tox -e cryptography
+
+  # CODE-QL
+  analyze:
+    name: CodeQL analysis
+    runs-on: ubuntu-latest
+    needs: [commit, spdx]
+    permissions:
+      security-events: write
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 2
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v4
+      with:
+         languages: 'python'
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v4
